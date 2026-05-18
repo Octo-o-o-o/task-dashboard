@@ -1,0 +1,97 @@
+{
+  "session": {
+    "id": "2026-05-18T10:00:00",
+    "title": "重构鉴权中间件（JWT 改造）",
+    "started_at": "2026-05-18T10:00:00Z",
+    "updated_at": "2026-05-18T11:42:00Z",
+    "project_path": "/Users/me/example-project"
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "number": 1,
+      "title": "调研现有 auth 实现",
+      "description": "梳理当前基于 session 的鉴权逻辑，识别替换风险点",
+      "status": "completed",
+      "phase": "plan",
+      "started_at": "2026-05-18T10:00:00Z",
+      "completed_at": "2026-05-18T10:18:00Z",
+      "tags": ["auth", "research"],
+      "notes": [
+        { "at": "2026-05-18T10:18:00Z", "text": "现状：cookie session + Redis store；服务间靠 service token" }
+      ]
+    },
+    {
+      "id": "T2",
+      "number": 2,
+      "title": "设计 JWT 流程",
+      "description": "替换现有 session-based 鉴权，采用 RS256 JWT，引入 refresh token 流程",
+      "status": "completed",
+      "phase": "plan",
+      "depends_on": ["T1"],
+      "started_at": "2026-05-18T10:20:00Z",
+      "completed_at": "2026-05-18T10:55:00Z",
+      "tags": ["auth", "design"],
+      "notes": [
+        { "at": "2026-05-18T10:30:00Z", "text": "采用 RS256（非 HS256），理由：跨服务验签更安全" },
+        { "at": "2026-05-18T10:55:00Z", "text": "refresh token 用 opaque + DB 撤销表" }
+      ]
+    },
+    {
+      "id": "T3",
+      "number": 3,
+      "title": "实现 token 签发",
+      "description": "封装 sign() 与 issueTokenPair() 帮助函数",
+      "status": "in_progress",
+      "phase": "execute",
+      "depends_on": ["T2"],
+      "started_at": "2026-05-18T11:00:00Z",
+      "tags": ["auth", "backend"]
+    },
+    {
+      "id": "T4",
+      "number": 4,
+      "title": "实现 token 验证中间件",
+      "description": "Express middleware：校验 JWT、注入 user 到 req",
+      "status": "blocked",
+      "phase": "execute",
+      "depends_on": ["T2"],
+      "tags": ["auth", "middleware"],
+      "notes": [
+        { "at": "2026-05-18T11:30:00Z", "text": "受阻：等 SecOps 给出 audience claim 规范" }
+      ]
+    },
+    {
+      "id": "T5",
+      "number": 5,
+      "title": "写单元测试",
+      "status": "pending",
+      "phase": "verify",
+      "depends_on": ["T3", "T4"],
+      "tags": ["test"]
+    },
+    {
+      "id": "T6",
+      "number": 6,
+      "title": "实现 token 撤销机制",
+      "status": "abandoned",
+      "phase": "execute",
+      "depends_on": ["T3"],
+      "tags": ["security"],
+      "notes": [
+        { "at": "2026-05-18T11:42:00Z", "text": "运营评估后不做：当前规模不需要主动撤销，refresh token 短 TTL 已经够" }
+      ]
+    },
+    {
+      "id": "T7",
+      "number": 7,
+      "title": "迁移 legacy login 路由",
+      "status": "deleted",
+      "phase": "followup",
+      "tags": ["legacy"],
+      "notes": [
+        { "at": "2026-05-18T10:25:00Z", "text": "改用方案 B：让 legacy 路由继续用 session，等下一个 sprint 再切" }
+      ]
+    }
+  ]
+}
