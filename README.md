@@ -9,7 +9,7 @@ A [Claude Code skill](https://code.claude.com/docs/en/skills) that maintains a b
 
 > 一个 Claude Code skill，在执行多步骤任务时维护一份漂亮的、自包含的 HTML 看板，让你可以在浏览器里实时看到 Claude 正在做什么、做完了什么、任务之间怎么关联。
 
-![Dashboard preview (dark)](assets/dashboard-dark.png)
+![Dashboard preview (dark, 9 tasks)](assets/dashboard-dark.png)
 
 <details>
 <summary>Light theme preview</summary>
@@ -18,11 +18,24 @@ A [Claude Code skill](https://code.claude.com/docs/en/skills) that maintains a b
 
 </details>
 
+<details>
+<summary>Scales to 70+ tasks (heatmap-style flow + compact feed)</summary>
+
+![Dashboard at scale](assets/dashboard-scale.png)
+
+</details>
+
 ## Features
 
 - **Single-file HTML** at `.claude-tasks/dashboard.html` — double-click to open, no server, no dependencies.
-- **Auto-laid-out SVG flow chart** based on `depends_on` — wraps each layer onto multiple rows when wide, and replaces fan-out spaghetti with a clean **bus-style** connector when a node has many children.
-- **Two-track board**: a chronological **feed** (in-progress + blocked + completed, newest first) on the left two-thirds; an **upcoming queue** on the right one-third; archived tasks tucked into a collapsible footer. Layout collapses gracefully when the queue is empty.
+- **SVG flow chart that scales** — three auto-picked density presets:
+  - ≤ 15 tasks: full-size cards inside the flow
+  - 16–50: compact cards with title only
+  - 51+: heatmap squares (status-colored, id only) so 100 tasks still fit on one screen
+  Each layer wraps to multiple rows when too wide, and a 5-child fan-out collapses into a clean horizontal bus instead of crossing curves.
+- **Two-track board**: a chronological **feed** (in-progress + blocked + completed, newest first) on the left two-thirds; an **upcoming queue** on the right one-third; archived tasks in a collapsible footer. Layout collapses gracefully when the queue is empty.
+- **Search + filter toolbar** — substring search across titles, descriptions, tags, and ids; status chips toggle on/off; tags inside cards are click-to-filter. All state is reflected in the URL hash, so you can bookmark or share a filtered view.
+- **Cards collapse when there are many tasks** — the feed defaults to a one-line summary above 20 tasks; click the chevron or any SVG node to expand a specific card.
 - **Persistent history** — `abandoned` / `deleted` tasks are kept with their reasons. Never silently removed.
 - **Single command, two modes** — type `/task-dashboard` mid-session and the skill decides whether to initialize from scratch or reconstruct from prior conversation. On first creation Claude auto-opens the dashboard in your default browser so you don't have to hunt for the `.claude-tasks/` hidden directory.
 - Dark & light themes · keyboard navigation · `prefers-reduced-motion` support.

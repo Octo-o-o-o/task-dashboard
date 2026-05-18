@@ -8,6 +8,13 @@ The output is a single HTML file with inlined CSS, JS, and data. Open it
 directly in a browser; no server required. Pass --open to additionally
 launch the file in the default browser after rendering. See
 references/schema.md for the expected input shape.
+
+The renderer adapts to task count:
+  - up to 15 tasks: full-size flow nodes, expanded feed cards
+  - 16-50: smaller flow nodes, feed cards collapsed by default
+  - 51+: heatmap-style flow nodes (status-colored squares with id only),
+         feed cards collapsed
+A search box, status chips, and tag click-to-filter live at the top.
 """
 from __future__ import annotations
 
@@ -36,18 +43,43 @@ PHASE_META = {
     "followup": {"label": "后续",   "color": "#f97316"},
 }
 
-NODE_W, NODE_H = 168, 38
-GAP_X, GAP_Y_INTRA = 16, 14       # 节点间距 + layer 内多行行距
-GAP_Y_LAYER = 36                  # layer 之间的间距
-SVG_PAD = 18                      # SVG 内边距
-SVG_MAX_W = 1100                  # 单行最大宽（超出自动换行）
-FANOUT_BUS_THRESHOLD = 5          # 父节点子数超过此值时改用 bus
+# Three SVG density presets, picked by total task count.
+SVG_PRESETS = {
+    "big": {
+        "node_w": 168, "node_h": 38,
+        "gap_x": 16, "gap_y_intra": 14, "gap_y_layer": 36,
+        "title_units": 22, "show_status": True, "show_title": True, "fill_status": False,
+    },
+    "normal": {
+        "node_w": 124, "node_h": 30,
+        "gap_x": 12, "gap_y_intra": 10, "gap_y_layer": 28,
+        "title_units": 14, "show_status": False, "show_title": True, "fill_status": False,
+    },
+    "compact": {
+        "node_w": 56, "node_h": 24,
+        "gap_x": 8, "gap_y_intra": 8, "gap_y_layer": 20,
+        "title_units": 0, "show_status": False, "show_title": False, "fill_status": True,
+    },
+}
+
+SVG_PAD = 18
+SVG_MAX_W = 1100
+FANOUT_BUS_THRESHOLD = 5
+
+DEFAULT_COMPACT_THRESHOLD = 20  # feed cards collapse by default when total tasks exceed this
+
+
+def pick_svg_preset(total):
+    if total <= 15:
+        return SVG_PRESETS["big"]
+    if total <= 50:
+        return SVG_PRESETS["normal"]
+    return SVG_PRESETS["compact"]
 
 
 # ---------- layout ----------
 
 def topo_layers(tasks):
-    """Pure topological grouping by depends_on. Cycle-safe."""
     by_id = {t["id"]: t for t in tasks}
     incoming = {t["id"]: [d for d in (t.get("depends_on") or []) if d in by_id]
                 for t in tasks}
@@ -63,53 +95,49 @@ def topo_layers(tasks):
     return layers
 
 
-def layout(tasks):
-    """Return (positions, width, height, parent_to_children).
-
-    Each layer wraps into multiple visual rows when it exceeds SVG_MAX_W.
-    """
+def layout(tasks, preset):
     layers = topo_layers(tasks)
     if not layers:
         return {}, SVG_MAX_W, 80, {}
 
+    node_w, node_h = preset["node_w"], preset["node_h"]
+    gap_x = preset["gap_x"]
+    gap_intra = preset["gap_y_intra"]
+    gap_layer = preset["gap_y_layer"]
+
     inner_w = SVG_MAX_W - SVG_PAD * 2
-    max_cols = max(1, (inner_w + GAP_X) // (NODE_W + GAP_X))
+    max_cols = max(1, (inner_w + gap_x) // (node_w + gap_x))
 
     positions = {}
     y = SVG_PAD
-    last_y_of_layer = {}
-
     for li, layer in enumerate(layers):
         rows = math.ceil(len(layer) / max_cols)
         for r in range(rows):
             chunk = layer[r * max_cols: (r + 1) * max_cols]
-            row_w = len(chunk) * (NODE_W + GAP_X) - GAP_X
+            row_w = len(chunk) * (node_w + gap_x) - gap_x
             start_x = SVG_PAD + (inner_w - row_w) / 2
             for c, tid in enumerate(chunk):
-                positions[tid] = (start_x + c * (NODE_W + GAP_X), y)
-            y += NODE_H
+                positions[tid] = (start_x + c * (node_w + gap_x), y)
+            y += node_h
             if r < rows - 1:
-                y += GAP_Y_INTRA
-        last_y_of_layer[li] = y
+                y += gap_intra
         if li < len(layers) - 1:
-            y += GAP_Y_LAYER
+            y += gap_layer
 
     height = y + SVG_PAD
-    width = SVG_MAX_W
-
     parent_to_children = defaultdict(list)
     for t in tasks:
         for dep in t.get("depends_on") or []:
             if dep in positions:
                 parent_to_children[dep].append(t["id"])
-
-    return positions, width, height, parent_to_children
+    return positions, SVG_MAX_W, height, parent_to_children
 
 
 # ---------- svg ----------
 
-def truncate_label(text, max_units=24):
-    """Approximate display-width truncation (CJK ≈ 2, ASCII ≈ 1)."""
+def truncate_label(text, max_units):
+    if max_units <= 0:
+        return ""
     out, w = [], 0
     for ch in text:
         cw = 2 if ord(ch) > 127 else 1
@@ -124,19 +152,21 @@ def build_svg(tasks):
     if not visible:
         return '<div class="svg-empty">暂无活跃任务</div>'
 
-    positions, width, height, parent_to_children = layout(visible)
+    preset = pick_svg_preset(len(visible))
+    positions, width, height, parent_to_children = layout(visible, preset)
+    node_w, node_h = preset["node_w"], preset["node_h"]
+    gap_layer = preset["gap_y_layer"]
 
-    # ---- edges (with fanout-bus optimization) ----
     edges_svg = []
     for parent, children in parent_to_children.items():
         px, py = positions[parent]
-        px_c = px + NODE_W / 2
-        py_b = py + NODE_H
+        px_c = px + node_w / 2
+        py_b = py + node_h
 
         if len(children) < FANOUT_BUS_THRESHOLD:
             for child in children:
                 cx, cy = positions[child]
-                cx_c = cx + NODE_W / 2
+                cx_c = cx + node_w / 2
                 mid_y = (py_b + cy) / 2
                 edges_svg.append(
                     f'<path d="M{px_c:.1f},{py_b:.1f} '
@@ -144,52 +174,65 @@ def build_svg(tasks):
                     f'class="edge"/>'
                 )
         else:
-            child_centers = sorted(positions[c][0] + NODE_W / 2 for c in children)
+            child_centers = sorted(positions[c][0] + node_w / 2 for c in children)
             bus_x_min, bus_x_max = child_centers[0], child_centers[-1]
             bus_x_mid = (bus_x_min + bus_x_max) / 2
-            bus_y = py_b + GAP_Y_LAYER * 0.45
-            # parent → bus mid: vertical drop then horizontal
+            bus_y = py_b + gap_layer * 0.45
             edges_svg.append(
                 f'<path d="M{px_c:.1f},{py_b:.1f} L{px_c:.1f},{bus_y:.1f} L{bus_x_mid:.1f},{bus_y:.1f}" '
                 f'class="edge"/>'
             )
-            # horizontal bus
             edges_svg.append(
                 f'<path d="M{bus_x_min:.1f},{bus_y:.1f} L{bus_x_max:.1f},{bus_y:.1f}" class="edge bus"/>'
             )
-            # bus → each child (vertical drop)
             for child in children:
                 cx, cy = positions[child]
-                cx_c = cx + NODE_W / 2
+                cx_c = cx + node_w / 2
                 edges_svg.append(
                     f'<path d="M{cx_c:.1f},{bus_y:.1f} L{cx_c:.1f},{cy:.1f}" class="edge"/>'
                 )
 
-    # ---- nodes ----
     nodes_svg = []
     for t in visible:
         x, y = positions[t["id"]]
         meta = STATUS_META.get(t.get("status", "pending"), STATUS_META["pending"])
         color = meta["color"]
         num = escape(str(t.get("number", t.get("id", "?"))))
-        title = escape(truncate_label((t.get("title") or "").strip(), 22))
-        aria = escape(f"任务 {num} {meta['label']} {title}")
-        nodes_svg.append(f'''
-<g class="svg-node" data-task-id="{escape(t["id"])}" tabindex="0" role="button" aria-label="{aria}">
-  <rect x="{x:.1f}" y="{y:.1f}" rx="5" width="{NODE_W}" height="{NODE_H}" class="node-bg" stroke="{color}"/>
+        full_title = (t.get("title") or "").strip()
+        title = escape(truncate_label(full_title, preset["title_units"]))
+        tooltip = escape(f"#{num} {full_title} · {meta['label']}")
+
+        if preset["fill_status"]:
+            # compact heatmap-style: rect filled with status color, white id
+            nodes_svg.append(f'''
+<g class="svg-node compact" data-task-id="{escape(t["id"])}" tabindex="0" role="button">
+  <title>{tooltip}</title>
+  <rect x="{x:.1f}" y="{y:.1f}" rx="4" width="{node_w}" height="{node_h}" fill="{color}" class="node-bg-fill"/>
+  <text x="{x + node_w / 2:.1f}" y="{y + node_h / 2 + 4:.1f}" class="node-num-light" text-anchor="middle">#{num}</text>
+</g>''')
+        elif not preset["show_status"]:
+            # normal: title left, status icon on the right
+            nodes_svg.append(f'''
+<g class="svg-node" data-task-id="{escape(t["id"])}" tabindex="0" role="button">
+  <title>{tooltip}</title>
+  <rect x="{x:.1f}" y="{y:.1f}" rx="5" width="{node_w}" height="{node_h}" class="node-bg" stroke="{color}"/>
+  <text x="{x + 8:.1f}" y="{y + node_h / 2 + 4:.1f}" fill="{color}" class="node-num">#{num}</text>
+  <text x="{x + 30:.1f}" y="{y + node_h / 2 + 4:.1f}" class="node-title-sm">{title}</text>
+</g>''')
+        else:
+            # big: id+status on top, title below
+            nodes_svg.append(f'''
+<g class="svg-node" data-task-id="{escape(t["id"])}" tabindex="0" role="button" aria-label="{tooltip}">
+  <title>{tooltip}</title>
+  <rect x="{x:.1f}" y="{y:.1f}" rx="5" width="{node_w}" height="{node_h}" class="node-bg" stroke="{color}"/>
   <text x="{x + 11:.1f}" y="{y + 15:.1f}" fill="{color}" class="node-num">#{num}</text>
-  <text x="{x + NODE_W - 11:.1f}" y="{y + 15:.1f}" fill="{color}" class="node-status" text-anchor="end">{escape(meta['label'])}</text>
+  <text x="{x + node_w - 11:.1f}" y="{y + 15:.1f}" fill="{color}" class="node-status" text-anchor="end">{escape(meta['label'])}</text>
   <text x="{x + 11:.1f}" y="{y + 29:.1f}" class="node-title">{title}</text>
 </g>''')
 
     return f'''
 <svg width="{int(width)}" height="{int(height)}" viewBox="0 0 {int(width)} {int(height)}"
      xmlns="http://www.w3.org/2000/svg" class="flow-svg" role="img" aria-label="任务流程图">
-  <defs>
-    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" class="arrow-head"/>
-    </marker>
-  </defs>
   {''.join(edges_svg)}
   {''.join(nodes_svg)}
 </svg>'''
@@ -197,7 +240,19 @@ def build_svg(tasks):
 
 # ---------- cards ----------
 
-def render_task_card(t):
+def task_search_text(t):
+    """Lowercased haystack for the search box."""
+    bits = [
+        str(t.get("number") or ""),
+        str(t.get("id") or ""),
+        (t.get("title") or ""),
+        (t.get("description") or ""),
+        " ".join(t.get("tags") or []),
+    ]
+    return " ".join(bits).lower()
+
+
+def render_task_card(t, default_compact=False):
     meta = STATUS_META.get(t.get("status", "pending"), STATUS_META["pending"])
     color = meta["color"]
     archived = t.get("status") in ("abandoned", "deleted")
@@ -217,7 +272,10 @@ def render_task_card(t):
     tags = t.get("tags") or []
     tags_html = ""
     if tags:
-        chips = "".join(f'<span class="chip">{escape(str(g))}</span>' for g in tags)
+        chips = "".join(
+            f'<button type="button" class="chip tag-chip" data-tag="{escape(str(g))}">{escape(str(g))}</button>'
+            for g in tags
+        )
         tags_html = f'<div class="row tags">{chips}</div>'
 
     times = []
@@ -237,28 +295,38 @@ def render_task_card(t):
     desc = (t.get("description") or "").strip()
     desc_html = f'<p class="desc">{escape(desc)}</p>' if desc else ""
 
+    classes = ["card"]
+    if archived:        classes.append("archived")
+    if default_compact: classes.append("compact")
+
     return f'''
-<article class="card{' archived' if archived else ''}" data-task-id="{escape(t["id"])}" style="--c:{color}">
+<article class="{' '.join(classes)}" data-task-id="{escape(t["id"])}"
+         data-status="{escape(t.get("status", "pending"))}"
+         data-phase="{escape(t.get("phase") or "")}"
+         data-tags="{escape(','.join(tags))}"
+         data-search="{escape(task_search_text(t))}"
+         style="--c:{color}">
   <header>
+    <button type="button" class="toggle" aria-label="展开/收起">▸</button>
     <span class="num">#{escape(str(t.get("number", t["id"])))}</span>
     <h3>{escape(t.get("title", "(无标题)"))}</h3>
     <span class="pill status" style="--c:{color}">{meta['icon']} {escape(meta['label'])}</span>
     {phase_html}
   </header>
-  {desc_html}{deps_html}{tags_html}{times_html}{notes_html}
+  <div class="card-body">
+    {desc_html}{deps_html}{tags_html}{times_html}{notes_html}
+  </div>
 </article>'''
 
 
 def feed_sort_key(t):
-    """Order: active (in_progress / blocked) above completed; within each group,
-    most recent activity first; tie-break by task number desc."""
     status = t.get("status")
     bucket = 1 if status in ("in_progress", "blocked") else 0
     last_activity = t.get("completed_at") or t.get("started_at") or ""
     return (bucket, last_activity, t.get("number") or 0)
 
 
-def render_board(tasks):
+def render_board(tasks, default_compact):
     feed, queue, archive = [], [], []
     for t in tasks:
         meta = STATUS_META.get(t.get("status", "pending"), STATUS_META["pending"])
@@ -270,35 +338,74 @@ def render_board(tasks):
     queue.sort(key=lambda t: t.get("number") or 0)
     archive.sort(key=lambda t: t.get("number") or 0, reverse=True)
 
-    feed_cards = "".join(render_task_card(t) for t in feed) if feed \
-        else '<div class="empty">暂无进展</div>'
-    queue_cards = "".join(render_task_card(t) for t in queue)
-    archive_cards = "".join(render_task_card(t) for t in archive)
+    feed_cards = "".join(render_task_card(t, default_compact) for t in feed) \
+        if feed else '<div class="empty" data-empty="feed">暂无进展</div>'
+    queue_cards = "".join(render_task_card(t, default_compact) for t in queue)
+    archive_cards = "".join(render_task_card(t, default_compact=True) for t in archive)
 
     has_queue = bool(queue)
     has_archive = bool(archive)
 
     queue_html = (
-        f'<aside class="queue"><h2 class="section-title">'
-        f'<span class="col-name">队列</span><span class="count">{len(queue)}</span>'
-        f'</h2><div class="track-body">{queue_cards}</div></aside>'
+        f'<aside class="queue" data-track="queue"><h2 class="section-title">'
+        f'<span class="col-name">队列</span><span class="count" data-count="queue">{len(queue)}</span>'
+        f'</h2><div class="track-body">{queue_cards}'
+        f'<div class="empty hidden" data-empty="queue">无匹配结果</div></div></aside>'
     ) if has_queue else ""
 
     archive_html = (
-        f'<details class="archive"{(" open" if len(archive) <= 3 else "")}>'
-        f'<summary>已归档 · {len(archive)}</summary>'
-        f'<div class="archive-body">{archive_cards}</div></details>'
+        f'<details class="archive" data-track="archive"{(" open" if len(archive) <= 3 else "")}>'
+        f'<summary>已归档 · <span data-count="archive">{len(archive)}</span></summary>'
+        f'<div class="archive-body">{archive_cards}'
+        f'<div class="empty hidden" data-empty="archive">无匹配结果</div></div></details>'
     ) if has_archive else ""
 
     board_cls = "board" + ("" if has_queue else " no-queue")
     return f'''
 <div class="{board_cls}">
-  <section class="feed"><h2 class="section-title">
-    <span class="col-name">进展</span><span class="count">{len(feed)}</span>
-  </h2><div class="track-body">{feed_cards}</div></section>
+  <section class="feed" data-track="feed"><h2 class="section-title">
+    <span class="col-name">进展</span><span class="count" data-count="feed">{len(feed)}</span>
+  </h2><div class="track-body">{feed_cards}
+    <div class="empty hidden" data-empty="feed-filtered">无匹配结果</div>
+  </div></section>
   {queue_html}
 </div>
 {archive_html}'''
+
+
+# ---------- toolbar ----------
+
+def render_toolbar(tasks):
+    counts = defaultdict(int)
+    for t in tasks:
+        counts[t.get("status") or "pending"] += 1
+
+    status_chips = []
+    for key in ("in_progress", "blocked", "pending", "completed", "abandoned", "deleted"):
+        if counts[key] == 0:
+            continue
+        meta = STATUS_META[key]
+        status_chips.append(
+            f'<button type="button" class="status-chip active" data-status="{key}" '
+            f'style="--c:{meta["color"]}" aria-pressed="true">'
+            f'<span class="ch-icon">{meta["icon"]}</span>'
+            f'<span class="ch-label">{escape(meta["label"])}</span>'
+            f'<span class="ch-count">{counts[key]}</span>'
+            f'</button>'
+        )
+
+    return f'''
+<section class="toolbar" aria-label="筛选">
+  <div class="search-wrap">
+    <svg class="search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="7" cy="7" r="5"/><path d="M11 11l3 3"/>
+    </svg>
+    <input id="searchInput" type="search" placeholder="搜索任务（标题、描述、标签、编号）…" aria-label="搜索任务">
+  </div>
+  <div class="status-chips">{''.join(status_chips)}</div>
+  <div class="active-tags" id="activeTags" hidden></div>
+  <button type="button" class="clear-filters" id="clearFilters" hidden>清除筛选</button>
+</section>'''
 
 
 # ---------- stats ----------
@@ -338,6 +445,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
   font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
   -webkit-font-smoothing:antialiased}
 button{font:inherit}
+.hidden{display:none !important}
 
 /* topbar */
 .topbar{position:sticky;top:0;z-index:10;background:var(--panel);
@@ -367,6 +475,36 @@ button{font:inherit}
 .stats{display:flex;gap:14px;font-size:11.5px;color:var(--fg-2)}
 .stats span b{color:var(--fg);font-weight:600;margin-right:3px}
 
+/* toolbar */
+.toolbar{background:var(--panel);padding:10px 22px;border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.search-wrap{position:relative;flex:1;min-width:220px;max-width:400px;display:flex;align-items:center}
+.search-icon{position:absolute;left:9px;width:13px;height:13px;color:var(--fg-3);pointer-events:none}
+.search-wrap input{width:100%;background:var(--panel-2);color:var(--fg);
+  border:1px solid var(--line-2);border-radius:6px;padding:6px 10px 6px 28px;font-size:12px;
+  outline:none;transition:border-color .15s}
+.search-wrap input:focus{border-color:var(--accent)}
+.search-wrap input::-webkit-search-cancel-button{filter:invert(.4)}
+.status-chips{display:flex;gap:5px;flex-wrap:wrap}
+.status-chip{display:inline-flex;align-items:center;gap:5px;background:transparent;
+  border:1px solid var(--line-2);border-radius:6px;padding:4px 8px;font-size:11.5px;
+  color:var(--fg-3);cursor:pointer;transition:all .12s}
+.status-chip .ch-count{background:var(--panel-2);padding:0 5px;border-radius:8px;font-size:10.5px;color:var(--fg-3)}
+.status-chip.active{color:var(--c);border-color:color-mix(in srgb,var(--c) 50%,transparent);
+  background:color-mix(in srgb,var(--c) 10%,transparent)}
+.status-chip.active .ch-count{background:color-mix(in srgb,var(--c) 18%,transparent);color:var(--c)}
+.status-chip:hover{border-color:var(--c, var(--accent))}
+.active-tags{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.active-tags::before{content:"标签";color:var(--fg-3);font-size:11px;margin-right:4px}
+.active-tag{display:inline-flex;align-items:center;gap:4px;background:var(--panel-2);
+  border:1px solid var(--line-2);border-radius:10px;padding:2px 7px;font-size:10.5px;color:var(--fg-2);
+  cursor:pointer}
+.active-tag::after{content:"✕";color:var(--fg-3);font-size:10px;margin-left:1px}
+.active-tag:hover{border-color:var(--accent);color:var(--fg)}
+.clear-filters{background:transparent;color:var(--fg-3);border:0;font-size:11px;
+  text-decoration:underline;cursor:pointer;padding:4px 6px}
+.clear-filters:hover{color:var(--fg)}
+
 /* flow */
 .flow{padding:18px 22px;border-bottom:1px solid var(--line)}
 .section-title{margin:0 0 10px;font-size:11px;font-weight:600;color:var(--fg-3);
@@ -379,13 +517,18 @@ button{font:inherit}
 .svg-node:focus{outline:none}
 .svg-node:focus rect{stroke-width:2.5}
 .svg-node:hover rect{filter:brightness(1.08)}
+.svg-node.hidden{display:none}
+.svg-node.compact rect{stroke-width:0}
+.svg-node.compact:hover rect{filter:brightness(1.12)}
 .node-bg{fill:var(--panel-2);stroke-width:1.5}
+.node-bg-fill{}
 .node-num{font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
+.node-num-light{font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;fill:#fff}
 .node-status{font:500 10px/1 -apple-system,system-ui,sans-serif}
 .node-title{font:500 12px/1 -apple-system,system-ui,sans-serif;fill:var(--fg)}
+.node-title-sm{font:500 11px/1 -apple-system,system-ui,sans-serif;fill:var(--fg)}
 .edge{fill:none;stroke:var(--line-2);stroke-width:1.2}
 .edge.bus{stroke-width:1.6;stroke-linecap:round}
-.arrow-head{fill:var(--line-2)}
 .svg-empty{padding:28px;text-align:center;color:var(--fg-3);font-size:12.5px}
 
 /* main board */
@@ -393,7 +536,7 @@ main{padding:18px 22px 32px}
 .board{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:14px;align-items:start}
 .board.no-queue{grid-template-columns:1fr}
 .feed,.queue{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-  display:flex;flex-direction:column;max-height:none}
+  display:flex;flex-direction:column}
 .feed > .section-title,.queue > .section-title{margin:0;padding:11px 14px;
   border-bottom:1px solid var(--line);color:var(--fg-2)}
 .col-name{color:var(--fg-2);font-weight:600;letter-spacing:.6px}
@@ -422,17 +565,30 @@ main{padding:18px 22px 32px}
 .card.archived{opacity:.55}
 .card.archived h3{text-decoration:line-through;text-decoration-color:var(--fg-3)}
 .card.flash{box-shadow:0 0 0 2px var(--accent)}
-.card header{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.card.hidden{display:none}
+.card header{display:flex;align-items:center;gap:7px;flex-wrap:wrap;cursor:default}
 .card h3{margin:0;font-size:13px;font-weight:600;flex:1;min-width:90px;line-height:1.4}
 .card .num{font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--c)}
+.toggle{background:transparent;border:0;color:var(--fg-3);cursor:pointer;padding:0;
+  width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;
+  font-size:10px;line-height:1;transition:transform .15s,color .15s}
+.toggle:hover{color:var(--fg)}
+.card:not(.compact) .toggle{transform:rotate(90deg)}
+.card.compact .card-body{display:none}
+.card.compact{padding:8px 12px;gap:0}
 .pill{font-size:10.5px;padding:2px 7px;border-radius:10px;font-weight:600;
   background:color-mix(in srgb,var(--c) 14%,transparent);color:var(--c);
   border:1px solid color-mix(in srgb,var(--c) 28%,transparent)}
 .desc{margin:0;color:var(--fg-2);font-size:12.5px;line-height:1.55}
+.card-body{display:flex;flex-direction:column;gap:7px}
 .row{display:flex;align-items:center;gap:5px;flex-wrap:wrap;font-size:11px}
 .row-label{color:var(--fg-3)}
 .chip{display:inline-block;padding:1px 7px;background:var(--panel);
   border:1px solid var(--line);border-radius:8px;font-size:10.5px;color:var(--fg-2)}
+button.chip{font:inherit;cursor:pointer;transition:border-color .12s,color .12s,background .12s}
+button.chip:hover{border-color:var(--accent);color:var(--fg)}
+button.chip.active{background:color-mix(in srgb,var(--accent) 18%,transparent);
+  border-color:var(--accent);color:var(--accent)}
 .times{font-size:10.5px;color:var(--fg-3)}
 .notes{font-size:11.5px;background:var(--panel);border:1px solid var(--line);border-radius:6px}
 .notes summary{cursor:pointer;color:var(--fg-2);padding:6px 10px;list-style:none;font-weight:500}
@@ -449,13 +605,15 @@ footer code{background:var(--panel-2);padding:1px 5px;border-radius:3px;font-siz
 @media (max-width:780px){
   .board{grid-template-columns:1fr}
   .archive-body{grid-template-columns:1fr}
-  .topbar,.progress,.flow,main,footer{padding-left:14px;padding-right:14px}
+  .topbar,.progress,.toolbar,.flow,main,footer{padding-left:14px;padding-right:14px}
+  .search-wrap{max-width:none}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{transition-duration:.01ms !important;animation-duration:.01ms !important}
 }
 @supports not (color: color-mix(in srgb, red, blue)){
-  .pill{background:var(--panel);border-color:var(--line-2)}
+  .pill,.status-chip.active,.status-chip.active .ch-count{background:var(--panel);border-color:var(--line-2)}
+  button.chip.active{background:var(--panel)}
 }
 """
 
@@ -468,6 +626,8 @@ def render_html(data):
     session = data.get("session") or {}
     tasks = data.get("tasks") or []
     stats = compute_stats(tasks)
+    total = len(tasks)
+    default_compact = total > DEFAULT_COMPACT_THRESHOLD
 
     title = escape(session.get("title") or "任务看板")
     project = escape(session.get("project_path") or "")
@@ -475,7 +635,8 @@ def render_html(data):
     updated = escape(session.get("updated_at") or "")
 
     svg = build_svg(tasks)
-    board = render_board(tasks)
+    toolbar = render_toolbar(tasks)
+    board = render_board(tasks, default_compact)
 
     meta_items = []
     if project: meta_items.append(f'<dt>项目</dt><dd><code>{project}</code></dd>')
@@ -513,6 +674,8 @@ def render_html(data):
   </div>
 </section>
 
+{toolbar}
+
 <section class="flow">
   <h2 class="section-title"><span>流程</span></h2>
   <div class="flow-wrap">{svg}</div>
@@ -526,18 +689,168 @@ def render_html(data):
 
 <script>
 (function(){{
+  // ---------- theme ----------
   const sun = `{SUN_SVG}`, moon = `{MOON_SVG}`;
   const btn = document.getElementById('themeBtn');
   const icon = btn.querySelector('.theme-icon');
   const saved = localStorage.getItem('task-dashboard-theme') || 'dark';
-  apply(saved);
-  btn.addEventListener('click', () => apply(document.body.dataset.theme === 'dark' ? 'light' : 'dark'));
-  function apply(t) {{
+  applyTheme(saved);
+  btn.addEventListener('click', () => applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark'));
+  function applyTheme(t) {{
     document.body.dataset.theme = t;
     localStorage.setItem('task-dashboard-theme', t);
     icon.innerHTML = t === 'dark' ? moon : sun;
   }}
 
+  // ---------- filter state ----------
+  const allStatuses = Array.from(document.querySelectorAll('.status-chip'))
+    .map(b => b.dataset.status);
+  const state = {{
+    q: '',
+    statuses: new Set(allStatuses),
+    tags: new Set(),
+  }};
+  const searchInput = document.getElementById('searchInput');
+  const activeTagsBox = document.getElementById('activeTags');
+  const clearBtn = document.getElementById('clearFilters');
+
+  // ---------- URL hash ----------
+  function loadHash() {{
+    const h = location.hash.replace(/^#/, '');
+    if (!h) return;
+    const params = new URLSearchParams(h);
+    if (params.get('q')) {{ state.q = params.get('q'); searchInput.value = state.q; }}
+    if (params.get('status')) {{
+      const set = new Set(params.get('status').split(',').filter(Boolean));
+      state.statuses = new Set(allStatuses.filter(s => set.has(s)));
+      document.querySelectorAll('.status-chip').forEach(c => {{
+        const on = state.statuses.has(c.dataset.status);
+        c.classList.toggle('active', on);
+        c.setAttribute('aria-pressed', on);
+      }});
+    }}
+    if (params.get('tags')) {{
+      state.tags = new Set(params.get('tags').split(',').filter(Boolean));
+    }}
+  }}
+  function syncHash() {{
+    const params = new URLSearchParams();
+    if (state.q) params.set('q', state.q);
+    if (state.statuses.size !== allStatuses.length)
+      params.set('status', [...state.statuses].join(','));
+    if (state.tags.size) params.set('tags', [...state.tags].join(','));
+    const h = params.toString();
+    history.replaceState(null, '', h ? '#' + h : location.pathname + location.search);
+  }}
+
+  // ---------- apply ----------
+  function apply() {{
+    const q = state.q.toLowerCase().trim();
+    const trackVisible = {{ feed: 0, queue: 0, archive: 0 }};
+    document.querySelectorAll('.card').forEach(card => {{
+      const status = card.dataset.status;
+      const tags = (card.dataset.tags || '').split(',').filter(Boolean);
+      const search = card.dataset.search || '';
+      const ok = state.statuses.has(status)
+        && (!state.tags.size || tags.some(t => state.tags.has(t)))
+        && (!q || search.includes(q));
+      card.classList.toggle('hidden', !ok);
+      if (ok) {{
+        const trackEl = card.closest('[data-track]');
+        if (trackEl) trackVisible[trackEl.dataset.track]++;
+      }}
+    }});
+
+    // sync svg nodes
+    document.querySelectorAll('.svg-node').forEach(n => {{
+      const id = n.dataset.taskId;
+      const card = document.querySelector('.card[data-task-id="' + CSS.escape(id) + '"]');
+      n.classList.toggle('hidden', !card || card.classList.contains('hidden'));
+    }});
+
+    // update counts + empty states per track
+    Object.entries(trackVisible).forEach(([track, n]) => {{
+      const countEl = document.querySelector(`[data-count="${{track}}"]`);
+      if (countEl) countEl.textContent = n;
+      const emptyEl = document.querySelector(`[data-empty="${{track}}-filtered"], [data-empty="${{track}}"]`);
+      if (emptyEl) emptyEl.classList.toggle('hidden', n > 0);
+    }});
+
+    // active tag chips
+    activeTagsBox.innerHTML = '';
+    state.tags.forEach(t => {{
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'active-tag';
+      el.textContent = t;
+      el.addEventListener('click', () => {{
+        state.tags.delete(t);
+        document.querySelectorAll(`.tag-chip[data-tag="${{CSS.escape(t)}}"]`)
+          .forEach(c => c.classList.remove('active'));
+        apply();
+      }});
+      activeTagsBox.appendChild(el);
+    }});
+    activeTagsBox.hidden = state.tags.size === 0;
+
+    // clear button visibility
+    const dirty = state.q || state.statuses.size !== allStatuses.length || state.tags.size > 0;
+    clearBtn.hidden = !dirty;
+
+    syncHash();
+  }}
+
+  // ---------- chip events ----------
+  document.querySelectorAll('.status-chip').forEach(chip => {{
+    chip.addEventListener('click', () => {{
+      const s = chip.dataset.status;
+      if (state.statuses.has(s)) state.statuses.delete(s); else state.statuses.add(s);
+      chip.classList.toggle('active', state.statuses.has(s));
+      chip.setAttribute('aria-pressed', state.statuses.has(s));
+      apply();
+    }});
+  }});
+  document.querySelectorAll('.tag-chip').forEach(chip => {{
+    chip.addEventListener('click', (e) => {{
+      e.stopPropagation();
+      const t = chip.dataset.tag;
+      if (state.tags.has(t)) state.tags.delete(t); else state.tags.add(t);
+      document.querySelectorAll(`.tag-chip[data-tag="${{CSS.escape(t)}}"]`)
+        .forEach(c => c.classList.toggle('active', state.tags.has(t)));
+      apply();
+    }});
+  }});
+
+  // ---------- search ----------
+  let searchTimer;
+  searchInput.addEventListener('input', () => {{
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {{ state.q = searchInput.value; apply(); }}, 80);
+  }});
+
+  // ---------- clear ----------
+  clearBtn.addEventListener('click', () => {{
+    state.q = '';
+    searchInput.value = '';
+    state.statuses = new Set(allStatuses);
+    state.tags = new Set();
+    document.querySelectorAll('.status-chip').forEach(c => {{
+      c.classList.add('active');
+      c.setAttribute('aria-pressed', 'true');
+    }});
+    document.querySelectorAll('.tag-chip.active').forEach(c => c.classList.remove('active'));
+    apply();
+  }});
+
+  // ---------- card expand/collapse ----------
+  document.querySelectorAll('.card .toggle').forEach(t => {{
+    t.addEventListener('click', (e) => {{
+      e.stopPropagation();
+      t.closest('.card').classList.toggle('compact');
+    }});
+  }});
+
+  // ---------- svg node click → focus card ----------
   document.querySelectorAll('.svg-node').forEach(n => {{
     const id = n.dataset.taskId;
     n.addEventListener('click', () => focusCard(id));
@@ -548,12 +861,17 @@ def render_html(data):
   function focusCard(id) {{
     const card = document.querySelector('.card[data-task-id="' + CSS.escape(id) + '"]');
     if (!card) return;
+    card.classList.remove('compact');  // expand on focus
     const a = card.closest('details');
     if (a) a.open = true;
     card.scrollIntoView({{behavior:'smooth', block:'center'}});
     card.classList.add('flash');
     setTimeout(() => card.classList.remove('flash'), 1100);
   }}
+
+  // initial
+  loadHash();
+  apply();
 }})();
 </script>
 </body>
