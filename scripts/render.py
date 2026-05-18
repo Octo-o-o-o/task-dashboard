@@ -506,13 +506,37 @@ button{font:inherit}
 .clear-filters:hover{color:var(--fg)}
 
 /* flow */
-.flow{padding:18px 22px;border-bottom:1px solid var(--line)}
-.section-title{margin:0 0 10px;font-size:11px;font-weight:600;color:var(--fg-3);
-  letter-spacing:.7px;text-transform:uppercase;display:flex;align-items:center;justify-content:space-between}
-.flow-wrap{overflow:auto;max-height:480px;
-  background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 14px;
-  display:flex;justify-content:center;align-items:flex-start}
+.flow{padding:18px 22px 0;border-bottom:1px solid var(--line)}
+.section-title{margin:0;font-size:11px;font-weight:600;color:var(--fg-3);
+  letter-spacing:.7px;text-transform:uppercase;display:flex;align-items:center;gap:8px}
+.flow-header{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.flow-header .section-title{flex:1}
+.flow-action{background:transparent;color:var(--fg-3);border:1px solid var(--line-2);
+  border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer;
+  display:inline-flex;align-items:center;gap:4px;transition:color .12s,border-color .12s}
+.flow-action:hover{color:var(--fg);border-color:var(--accent)}
+.flow-action svg{width:11px;height:11px}
+.flow-wrap{overflow:auto;
+  background:var(--panel);border:1px solid var(--line);border-radius:8px 8px 0 0;
+  padding:8px 14px;border-bottom:none;
+  display:flex;justify-content:center;align-items:flex-start;
+  min-height:180px;max-height:85vh;
+  height:var(--flow-h, clamp(280px, 50vh, 520px));
+  transition:height .12s ease}
 .flow-svg{display:block;max-width:100%;height:auto;flex:none}
+.flow-resizer{height:14px;cursor:ns-resize;display:flex;
+  align-items:center;justify-content:center;
+  background:var(--panel);border:1px solid var(--line);border-top:none;
+  border-radius:0 0 8px 8px;margin-bottom:18px;transition:background .12s}
+.flow-resizer:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.flow-resizer.dragging{background:color-mix(in srgb,var(--accent) 16%,transparent)}
+.flow-resizer-handle{width:42px;height:3px;background:var(--line-2);border-radius:2px;
+  transition:background .12s,width .12s}
+.flow-resizer:hover .flow-resizer-handle,
+.flow-resizer.dragging .flow-resizer-handle{background:var(--accent);width:60px}
+.flow.collapsed{padding-bottom:18px}
+.flow.collapsed .flow-wrap{display:none}
+.flow.collapsed .flow-resizer{display:none}
 .svg-node{cursor:pointer}
 .svg-node:focus{outline:none}
 .svg-node:focus rect{stroke-width:2.5}
@@ -529,7 +553,7 @@ button{font:inherit}
 .node-title-sm{font:500 11px/1 -apple-system,system-ui,sans-serif;fill:var(--fg)}
 .edge{fill:none;stroke:var(--line-2);stroke-width:1.2}
 .edge.bus{stroke-width:1.6;stroke-linecap:round}
-.svg-empty{padding:28px;text-align:center;color:var(--fg-3);font-size:12.5px}
+.svg-empty{padding:28px;text-align:center;color:var(--fg-3);font-size:12.5px;width:100%}
 
 /* main board */
 main{padding:18px 22px 32px}
@@ -676,9 +700,17 @@ def render_html(data):
 
 {toolbar}
 
-<section class="flow">
-  <h2 class="section-title"><span>流程</span></h2>
-  <div class="flow-wrap">{svg}</div>
+<section class="flow" id="flowSection">
+  <div class="flow-header">
+    <h2 class="section-title"><span>流程</span></h2>
+    <button id="flowResetBtn" class="flow-action" type="button" title="恢复默认高度（双击拖动条也可）">↻</button>
+    <button id="flowToggleBtn" class="flow-action" type="button" aria-expanded="true" title="折叠流程图">▾ 折叠</button>
+  </div>
+  <div class="flow-wrap" id="flowWrap">{svg}</div>
+  <div class="flow-resizer" id="flowResizer" role="separator" aria-orientation="horizontal"
+       aria-label="拖动调整流程图高度 · 双击重置" title="拖动调整 · 双击重置">
+    <div class="flow-resizer-handle"></div>
+  </div>
 </section>
 
 <main>{board}</main>
@@ -868,6 +900,88 @@ def render_html(data):
     card.classList.add('flash');
     setTimeout(() => card.classList.remove('flash'), 1100);
   }}
+
+  // ---------- flow resizer + collapse ----------
+  const flowSection = document.getElementById('flowSection');
+  const flowWrap = document.getElementById('flowWrap');
+  const flowResizer = document.getElementById('flowResizer');
+  const flowToggleBtn = document.getElementById('flowToggleBtn');
+  const flowResetBtn = document.getElementById('flowResetBtn');
+
+  const savedH = localStorage.getItem('task-dashboard-flow-h');
+  if (savedH) document.documentElement.style.setProperty('--flow-h', savedH);
+  if (localStorage.getItem('task-dashboard-flow-collapsed') === '1') setCollapsed(true);
+
+  function setCollapsed(c) {{
+    flowSection.classList.toggle('collapsed', c);
+    flowToggleBtn.setAttribute('aria-expanded', !c);
+    flowToggleBtn.textContent = c ? '▸ 展开' : '▾ 折叠';
+    flowToggleBtn.title = c ? '展开流程图' : '折叠流程图';
+    localStorage.setItem('task-dashboard-flow-collapsed', c ? '1' : '0');
+  }}
+  flowToggleBtn.addEventListener('click', () => setCollapsed(!flowSection.classList.contains('collapsed')));
+  flowResetBtn.addEventListener('click', () => {{
+    document.documentElement.style.removeProperty('--flow-h');
+    localStorage.removeItem('task-dashboard-flow-h');
+    if (flowSection.classList.contains('collapsed')) setCollapsed(false);
+  }});
+
+  let drag = null;
+  function startDrag(clientY) {{
+    drag = {{ startY: clientY, startH: flowWrap.offsetHeight }};
+    flowResizer.classList.add('dragging');
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+  }}
+  function doDrag(clientY) {{
+    if (!drag) return;
+    const max = Math.max(window.innerHeight * 0.85, 320);
+    const h = Math.max(180, Math.min(max, drag.startH + clientY - drag.startY));
+    document.documentElement.style.setProperty('--flow-h', h + 'px');
+  }}
+  function endDrag() {{
+    if (!drag) return;
+    drag = null;
+    flowResizer.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    const h = document.documentElement.style.getPropertyValue('--flow-h');
+    if (h) localStorage.setItem('task-dashboard-flow-h', h.trim());
+  }}
+  flowResizer.addEventListener('mousedown', (e) => {{
+    e.preventDefault();
+    startDrag(e.clientY);
+  }});
+  document.addEventListener('mousemove', (e) => drag && doDrag(e.clientY));
+  document.addEventListener('mouseup', endDrag);
+  flowResizer.addEventListener('touchstart', (e) => {{
+    if (e.touches[0]) startDrag(e.touches[0].clientY);
+  }}, {{ passive: true }});
+  document.addEventListener('touchmove', (e) => {{
+    if (drag && e.touches[0]) {{ e.preventDefault(); doDrag(e.touches[0].clientY); }}
+  }}, {{ passive: false }});
+  document.addEventListener('touchend', endDrag);
+  // double-click resets
+  flowResizer.addEventListener('dblclick', () => {{
+    document.documentElement.style.removeProperty('--flow-h');
+    localStorage.removeItem('task-dashboard-flow-h');
+  }});
+  // keyboard accessibility on resizer
+  flowResizer.tabIndex = 0;
+  flowResizer.addEventListener('keydown', (e) => {{
+    const cur = flowWrap.offsetHeight;
+    if (e.key === 'ArrowUp')    {{ e.preventDefault(); document.documentElement.style.setProperty('--flow-h', Math.max(180, cur - 24) + 'px'); }}
+    if (e.key === 'ArrowDown')  {{ e.preventDefault(); document.documentElement.style.setProperty('--flow-h', Math.min(window.innerHeight * 0.85, cur + 24) + 'px'); }}
+    if (e.key === 'PageUp')     {{ e.preventDefault(); document.documentElement.style.setProperty('--flow-h', Math.max(180, cur - 96) + 'px'); }}
+    if (e.key === 'PageDown')   {{ e.preventDefault(); document.documentElement.style.setProperty('--flow-h', Math.min(window.innerHeight * 0.85, cur + 96) + 'px'); }}
+    if (e.key === 'Home' || e.key === 'End' || e.key === 'Enter') {{
+      e.preventDefault();
+      document.documentElement.style.removeProperty('--flow-h');
+      localStorage.removeItem('task-dashboard-flow-h');
+    }}
+    const h = document.documentElement.style.getPropertyValue('--flow-h');
+    if (h) localStorage.setItem('task-dashboard-flow-h', h.trim());
+  }});
 
   // initial
   loadHash();

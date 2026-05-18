@@ -33,6 +33,7 @@ A [Claude Code skill](https://code.claude.com/docs/en/skills) that maintains a b
   - 16–50: compact cards with title only
   - 51+: heatmap squares (status-colored, id only) so 100 tasks still fit on one screen
   Each layer wraps to multiple rows when too wide, and a 5-child fan-out collapses into a clean horizontal bus instead of crossing curves.
+- **Resizable & collapsible flow** — drag the handle below the SVG to give it more or less room (state persists across sessions); double-click the handle (or hit the ↻ button) to reset; one-click ▾ Fold tucks the entire flow away when you just want to see the board. Keyboard friendly: focus the handle and use Arrow/PageUp/PageDown/Home/End.
 - **Two-track board**: a chronological **feed** (in-progress + blocked + completed, newest first) on the left two-thirds; an **upcoming queue** on the right one-third; archived tasks in a collapsible footer. Layout collapses gracefully when the queue is empty.
 - **Search + filter toolbar** — substring search across titles, descriptions, tags, and ids; status chips toggle on/off; tags inside cards are click-to-filter. All state is reflected in the URL hash, so you can bookmark or share a filtered view.
 - **Cards collapse when there are many tasks** — the feed defaults to a one-line summary above 20 tasks; click the chevron or any SVG node to expand a specific card.
