@@ -1,10 +1,7 @@
 ---
 name: task-dashboard
-description: 维护一份项目本地的 HTML 任务看板（SVG 流程图 + Kanban + 任务详情），让用户用浏览器实时跟踪 Claude 的多步骤工作。在用户输入 `/task-dashboard`、说"打开/维护/补一个任务看板"，或当前项目已有 `.claude-tasks/dashboard.json` 时启用。
-when_to_use: |
-  `/task-dashboard` 是单一入口，不论用户在会话什么阶段输入，都按"启用决策"流程走：根据上下文自动判断是初始化新看板、还是从已发生的对话补建。
-  已有 `.claude-tasks/dashboard.json` 的会话 — 后续每个有任务进展的轮次结束前同步并重渲染。
-argument-hint: "[任务描述（可选）]"
+description: 维护一份项目本地的 HTML 任务看板（SVG 流程图 + Kanban + 任务详情），让用户用浏览器实时跟踪 Claude 的多步骤工作。当用户输入 `/task-dashboard`（可选附带任务描述）、说"打开/维护/补一个任务看板"、"task dashboard"、"可视化任务"，或当前项目已存在 `.claude-tasks/dashboard.json` 时启用。`/task-dashboard` 是单一入口，不论用户在会话什么阶段输入都按 SKILL.md 中的"启用决策"流程走：根据上下文自动判断是初始化新看板、还是从已发生的对话补建。已有看板的会话，后续每个有任务进展的轮次结束前自动同步并重渲染。
+license: MIT
 allowed-tools: Bash(python3 *) Bash(mkdir *) Read Write Edit
 ---
 
