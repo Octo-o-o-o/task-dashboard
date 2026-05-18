@@ -3,7 +3,7 @@
     "id": "2026-05-18T10:00:00",
     "title": "重构鉴权中间件（JWT 改造）",
     "started_at": "2026-05-18T10:00:00Z",
-    "updated_at": "2026-05-18T11:42:00Z",
+    "updated_at": "2026-05-18T13:20:00Z",
     "project_path": "/Users/me/example-project"
   },
   "tasks": [
@@ -56,6 +56,7 @@
       "status": "blocked",
       "phase": "execute",
       "depends_on": ["T2"],
+      "started_at": "2026-05-18T11:20:00Z",
       "tags": ["auth", "middleware"],
       "notes": [
         { "at": "2026-05-18T11:30:00Z", "text": "受阻：等 SecOps 给出 audience claim 规范" }
@@ -73,18 +74,36 @@
     {
       "id": "T6",
       "number": 6,
+      "title": "更新 API 文档",
+      "status": "pending",
+      "phase": "followup",
+      "depends_on": ["T3"],
+      "tags": ["docs"]
+    },
+    {
+      "id": "T7",
+      "number": 7,
+      "title": "灰度发布到 staging",
+      "status": "pending",
+      "phase": "execute",
+      "depends_on": ["T5"],
+      "tags": ["release"]
+    },
+    {
+      "id": "T8",
+      "number": 8,
       "title": "实现 token 撤销机制",
       "status": "abandoned",
       "phase": "execute",
       "depends_on": ["T3"],
       "tags": ["security"],
       "notes": [
-        { "at": "2026-05-18T11:42:00Z", "text": "运营评估后不做：当前规模不需要主动撤销，refresh token 短 TTL 已经够" }
+        { "at": "2026-05-18T13:00:00Z", "text": "运营评估后不做：当前规模不需要主动撤销，refresh token 短 TTL 已经够" }
       ]
     },
     {
-      "id": "T7",
-      "number": 7,
+      "id": "T9",
+      "number": 9,
       "title": "迁移 legacy login 路由",
       "status": "deleted",
       "phase": "followup",

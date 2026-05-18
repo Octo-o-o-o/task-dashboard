@@ -21,10 +21,10 @@ A [Claude Code skill](https://code.claude.com/docs/en/skills) that maintains a b
 ## Features
 
 - **Single-file HTML** at `.claude-tasks/dashboard.html` — double-click to open, no server, no dependencies.
-- **Auto-laid-out SVG flow chart** based on `depends_on` (topological layers, cycle-safe).
-- **Kanban view** with four columns: Pending / In Progress / Completed / Archived.
+- **Auto-laid-out SVG flow chart** based on `depends_on` — wraps each layer onto multiple rows when wide, and replaces fan-out spaghetti with a clean **bus-style** connector when a node has many children.
+- **Two-track board**: a chronological **feed** (in-progress + blocked + completed, newest first) on the left two-thirds; an **upcoming queue** on the right one-third; archived tasks tucked into a collapsible footer. Layout collapses gracefully when the queue is empty.
 - **Persistent history** — `abandoned` / `deleted` tasks are kept with their reasons. Never silently removed.
-- **Single command, two modes** — type `/task-dashboard` mid-session and the skill decides whether to initialize from scratch or reconstruct from prior conversation.
+- **Single command, two modes** — type `/task-dashboard` mid-session and the skill decides whether to initialize from scratch or reconstruct from prior conversation. On first creation Claude auto-opens the dashboard in your default browser so you don't have to hunt for the `.claude-tasks/` hidden directory.
 - Dark & light themes · keyboard navigation · `prefers-reduced-motion` support.
 - Python 3 stdlib only · zero `pip install`.
 
@@ -60,14 +60,13 @@ Download the latest `task-dashboard.skill` from [Releases](https://github.com/Oc
 
 ## Try it without Claude
 
-The renderer is just a Python script. Render the bundled sample directly:
+The renderer is just a Python script. Render the bundled sample and have it pop open in your browser:
 
 ```bash
-python3 scripts/render.py references/example.json /tmp/dashboard.html
-open /tmp/dashboard.html       # macOS
-# xdg-open /tmp/dashboard.html # Linux
-# start /tmp/dashboard.html    # Windows
+python3 scripts/render.py references/example.json /tmp/dashboard.html --open
 ```
+
+Drop the `--open` flag to render without launching a browser (e.g. for CI).
 
 ## How it works
 

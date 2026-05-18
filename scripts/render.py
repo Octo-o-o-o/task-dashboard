@@ -2,28 +2,31 @@
 """Render a task dashboard JSON file to a self-contained HTML dashboard.
 
 Usage:
-    python3 render.py <input.json> <output.html>
+    python3 render.py <input.json> <output.html> [--open]
 
 The output is a single HTML file with inlined CSS, JS, and data. Open it
-directly in a browser; no server required. See references/schema.md for
-the expected input shape.
+directly in a browser; no server required. Pass --open to additionally
+launch the file in the default browser after rendering. See
+references/schema.md for the expected input shape.
 """
 from __future__ import annotations
 
 import json
+import math
 import sys
+import webbrowser
 from collections import defaultdict
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
 STATUS_META = {
-    "pending":     {"label": "待办",   "color": "#94a3b8", "icon": "○", "column": "pending"},
-    "in_progress": {"label": "进行中", "color": "#3b82f6", "icon": "◐", "column": "in-progress"},
-    "blocked":     {"label": "受阻",   "color": "#f59e0b", "icon": "⏸", "column": "in-progress"},
-    "completed":   {"label": "已完成", "color": "#22c55e", "icon": "✓", "column": "completed"},
-    "abandoned":   {"label": "已放弃", "color": "#64748b", "icon": "⊘", "column": "archived"},
-    "deleted":     {"label": "已删除", "color": "#64748b", "icon": "✕", "column": "archived"},
+    "pending":     {"label": "待办",   "color": "#94a3b8", "icon": "○", "track": "queue"},
+    "in_progress": {"label": "进行中", "color": "#3b82f6", "icon": "◐", "track": "feed"},
+    "blocked":     {"label": "受阻",   "color": "#f59e0b", "icon": "⏸", "track": "feed"},
+    "completed":   {"label": "已完成", "color": "#22c55e", "icon": "✓", "track": "feed"},
+    "abandoned":   {"label": "已放弃", "color": "#64748b", "icon": "⊘", "track": "archive"},
+    "deleted":     {"label": "已删除", "color": "#64748b", "icon": "✕", "track": "archive"},
 }
 
 PHASE_META = {
@@ -33,18 +36,18 @@ PHASE_META = {
     "followup": {"label": "后续",   "color": "#f97316"},
 }
 
-KANBAN_COLUMNS = [
-    ("pending",     "待办"),
-    ("in-progress", "进行中"),
-    ("completed",   "已完成"),
-    ("archived",    "已归档"),
-]
+NODE_W, NODE_H = 168, 38
+GAP_X, GAP_Y_INTRA = 16, 14       # 节点间距 + layer 内多行行距
+GAP_Y_LAYER = 36                  # layer 之间的间距
+SVG_PAD = 18                      # SVG 内边距
+SVG_MAX_W = 1100                  # 单行最大宽（超出自动换行）
+FANOUT_BUS_THRESHOLD = 5          # 父节点子数超过此值时改用 bus
 
 
 # ---------- layout ----------
 
 def topo_layers(tasks):
-    """Group tasks into layers by depends_on. Cycle-safe."""
+    """Pure topological grouping by depends_on. Cycle-safe."""
     by_id = {t["id"]: t for t in tasks}
     incoming = {t["id"]: [d for d in (t.get("depends_on") or []) if d in by_id]
                 for t in tasks}
@@ -52,7 +55,6 @@ def topo_layers(tasks):
     while remaining:
         layer = [tid for tid in remaining if all(d in placed for d in incoming[tid])]
         if not layer:
-            # cycle or unresolved — flush remaining as one layer to stay safe
             layer = list(remaining)
         layer.sort(key=lambda x: by_id[x].get("number") or 0)
         layers.append(layer)
@@ -61,65 +63,123 @@ def topo_layers(tasks):
     return layers
 
 
+def layout(tasks):
+    """Return (positions, width, height, parent_to_children).
+
+    Each layer wraps into multiple visual rows when it exceeds SVG_MAX_W.
+    """
+    layers = topo_layers(tasks)
+    if not layers:
+        return {}, SVG_MAX_W, 80, {}
+
+    inner_w = SVG_MAX_W - SVG_PAD * 2
+    max_cols = max(1, (inner_w + GAP_X) // (NODE_W + GAP_X))
+
+    positions = {}
+    y = SVG_PAD
+    last_y_of_layer = {}
+
+    for li, layer in enumerate(layers):
+        rows = math.ceil(len(layer) / max_cols)
+        for r in range(rows):
+            chunk = layer[r * max_cols: (r + 1) * max_cols]
+            row_w = len(chunk) * (NODE_W + GAP_X) - GAP_X
+            start_x = SVG_PAD + (inner_w - row_w) / 2
+            for c, tid in enumerate(chunk):
+                positions[tid] = (start_x + c * (NODE_W + GAP_X), y)
+            y += NODE_H
+            if r < rows - 1:
+                y += GAP_Y_INTRA
+        last_y_of_layer[li] = y
+        if li < len(layers) - 1:
+            y += GAP_Y_LAYER
+
+    height = y + SVG_PAD
+    width = SVG_MAX_W
+
+    parent_to_children = defaultdict(list)
+    for t in tasks:
+        for dep in t.get("depends_on") or []:
+            if dep in positions:
+                parent_to_children[dep].append(t["id"])
+
+    return positions, width, height, parent_to_children
+
+
 # ---------- svg ----------
+
+def truncate_label(text, max_units=24):
+    """Approximate display-width truncation (CJK ≈ 2, ASCII ≈ 1)."""
+    out, w = [], 0
+    for ch in text:
+        cw = 2 if ord(ch) > 127 else 1
+        if w + cw > max_units:
+            return "".join(out) + "…"
+        out.append(ch); w += cw
+    return text
+
 
 def build_svg(tasks):
     visible = [t for t in tasks if t.get("status") not in ("deleted", "abandoned")]
     if not visible:
         return '<div class="svg-empty">暂无活跃任务</div>'
 
-    layers = topo_layers(visible)
-    node_w, node_h = 168, 40
-    pad_x, pad_y = 28, 24
-    cols = max(len(layer) for layer in layers)
-    rows = len(layers)
-    width = max(640, cols * (node_w + pad_x) + pad_x)
-    height = rows * (node_h + pad_y) + pad_y
+    positions, width, height, parent_to_children = layout(visible)
 
-    pos = {}
-    for r, layer in enumerate(layers):
-        row_w = len(layer) * (node_w + pad_x) - pad_x
-        start_x = (width - row_w) / 2
-        for c, tid in enumerate(layer):
-            pos[tid] = (start_x + c * (node_w + pad_x), pad_y + r * (node_h + pad_y))
+    # ---- edges (with fanout-bus optimization) ----
+    edges_svg = []
+    for parent, children in parent_to_children.items():
+        px, py = positions[parent]
+        px_c = px + NODE_W / 2
+        py_b = py + NODE_H
 
-    edges = []
-    for t in visible:
-        for dep in t.get("depends_on") or []:
-            if dep not in pos:
-                continue
-            x1, y1 = pos[dep]
-            x2, y2 = pos[t["id"]]
-            sx, sy = x1 + node_w / 2, y1 + node_h
-            ex, ey = x2 + node_w / 2, y2
-            cy = (sy + ey) / 2
-            edges.append(
-                f'<path d="M{sx:.1f},{sy:.1f} C{sx:.1f},{cy:.1f} {ex:.1f},{cy:.1f} {ex:.1f},{ey:.1f}" '
-                f'class="edge" marker-end="url(#arr)"/>'
+        if len(children) < FANOUT_BUS_THRESHOLD:
+            for child in children:
+                cx, cy = positions[child]
+                cx_c = cx + NODE_W / 2
+                mid_y = (py_b + cy) / 2
+                edges_svg.append(
+                    f'<path d="M{px_c:.1f},{py_b:.1f} '
+                    f'C{px_c:.1f},{mid_y:.1f} {cx_c:.1f},{mid_y:.1f} {cx_c:.1f},{cy:.1f}" '
+                    f'class="edge"/>'
+                )
+        else:
+            child_centers = sorted(positions[c][0] + NODE_W / 2 for c in children)
+            bus_x_min, bus_x_max = child_centers[0], child_centers[-1]
+            bus_x_mid = (bus_x_min + bus_x_max) / 2
+            bus_y = py_b + GAP_Y_LAYER * 0.45
+            # parent → bus mid: vertical drop then horizontal
+            edges_svg.append(
+                f'<path d="M{px_c:.1f},{py_b:.1f} L{px_c:.1f},{bus_y:.1f} L{bus_x_mid:.1f},{bus_y:.1f}" '
+                f'class="edge"/>'
             )
+            # horizontal bus
+            edges_svg.append(
+                f'<path d="M{bus_x_min:.1f},{bus_y:.1f} L{bus_x_max:.1f},{bus_y:.1f}" class="edge bus"/>'
+            )
+            # bus → each child (vertical drop)
+            for child in children:
+                cx, cy = positions[child]
+                cx_c = cx + NODE_W / 2
+                edges_svg.append(
+                    f'<path d="M{cx_c:.1f},{bus_y:.1f} L{cx_c:.1f},{cy:.1f}" class="edge"/>'
+                )
 
-    nodes = []
+    # ---- nodes ----
+    nodes_svg = []
     for t in visible:
-        x, y = pos[t["id"]]
+        x, y = positions[t["id"]]
         meta = STATUS_META.get(t.get("status", "pending"), STATUS_META["pending"])
         color = meta["color"]
         num = escape(str(t.get("number", t.get("id", "?"))))
-        title = escape((t.get("title") or "").strip())
-        # truncate by visual width: ~ 18 CJK chars or 28 ASCII
-        if sum(2 if ord(c) > 127 else 1 for c in title) > 28:
-            cut = 0; w = 0
-            for ch in title:
-                w += 2 if ord(ch) > 127 else 1
-                if w > 26: break
-                cut += 1
-            title = title[:cut] + "…"
+        title = escape(truncate_label((t.get("title") or "").strip(), 22))
         aria = escape(f"任务 {num} {meta['label']} {title}")
-        nodes.append(f'''
+        nodes_svg.append(f'''
 <g class="svg-node" data-task-id="{escape(t["id"])}" tabindex="0" role="button" aria-label="{aria}">
-  <rect x="{x:.1f}" y="{y:.1f}" rx="6" width="{node_w}" height="{node_h}" class="node-bg" stroke="{color}"/>
-  <text x="{x + 12:.1f}" y="{y + 16:.1f}" fill="{color}" class="node-num">#{num}</text>
-  <text x="{x + node_w - 12:.1f}" y="{y + 16:.1f}" fill="{color}" class="node-status" text-anchor="end">{escape(meta['label'])}</text>
-  <text x="{x + 12:.1f}" y="{y + 31:.1f}" class="node-title">{title}</text>
+  <rect x="{x:.1f}" y="{y:.1f}" rx="5" width="{NODE_W}" height="{NODE_H}" class="node-bg" stroke="{color}"/>
+  <text x="{x + 11:.1f}" y="{y + 15:.1f}" fill="{color}" class="node-num">#{num}</text>
+  <text x="{x + NODE_W - 11:.1f}" y="{y + 15:.1f}" fill="{color}" class="node-status" text-anchor="end">{escape(meta['label'])}</text>
+  <text x="{x + 11:.1f}" y="{y + 29:.1f}" class="node-title">{title}</text>
 </g>''')
 
     return f'''
@@ -130,8 +190,8 @@ def build_svg(tasks):
       <path d="M0,0 L10,5 L0,10 z" class="arrow-head"/>
     </marker>
   </defs>
-  {''.join(edges)}
-  {''.join(nodes)}
+  {''.join(edges_svg)}
+  {''.join(nodes_svg)}
 </svg>'''
 
 
@@ -142,7 +202,6 @@ def render_task_card(t):
     color = meta["color"]
     archived = t.get("status") in ("abandoned", "deleted")
 
-    parts = []
     phase = PHASE_META.get(t.get("phase") or "")
     phase_html = (
         f'<span class="pill phase" style="--c:{phase["color"]}">{escape(phase["label"])}</span>'
@@ -190,24 +249,56 @@ def render_task_card(t):
 </article>'''
 
 
-def render_kanban(tasks):
-    cols = defaultdict(list)
+def feed_sort_key(t):
+    """Order: active (in_progress / blocked) above completed; within each group,
+    most recent activity first; tie-break by task number desc."""
+    status = t.get("status")
+    bucket = 1 if status in ("in_progress", "blocked") else 0
+    last_activity = t.get("completed_at") or t.get("started_at") or ""
+    return (bucket, last_activity, t.get("number") or 0)
+
+
+def render_board(tasks):
+    feed, queue, archive = [], [], []
     for t in tasks:
         meta = STATUS_META.get(t.get("status", "pending"), STATUS_META["pending"])
-        cols[meta["column"]].append(t)
+        if meta["track"] == "feed":      feed.append(t)
+        elif meta["track"] == "queue":   queue.append(t)
+        else:                            archive.append(t)
 
-    parts = ['<div class="kanban">']
-    for key, label in KANBAN_COLUMNS:
-        items = cols[key]
-        body = ("".join(render_task_card(t) for t in items)
-                if items else '<div class="empty">—</div>')
-        parts.append(
-            f'<section class="col col-{key}">'
-            f'<h2><span class="col-name">{label}</span><span class="count">{len(items)}</span></h2>'
-            f'<div class="col-body">{body}</div></section>'
-        )
-    parts.append('</div>')
-    return "".join(parts)
+    feed.sort(key=feed_sort_key, reverse=True)
+    queue.sort(key=lambda t: t.get("number") or 0)
+    archive.sort(key=lambda t: t.get("number") or 0, reverse=True)
+
+    feed_cards = "".join(render_task_card(t) for t in feed) if feed \
+        else '<div class="empty">暂无进展</div>'
+    queue_cards = "".join(render_task_card(t) for t in queue)
+    archive_cards = "".join(render_task_card(t) for t in archive)
+
+    has_queue = bool(queue)
+    has_archive = bool(archive)
+
+    queue_html = (
+        f'<aside class="queue"><h2 class="section-title">'
+        f'<span class="col-name">队列</span><span class="count">{len(queue)}</span>'
+        f'</h2><div class="track-body">{queue_cards}</div></aside>'
+    ) if has_queue else ""
+
+    archive_html = (
+        f'<details class="archive"{(" open" if len(archive) <= 3 else "")}>'
+        f'<summary>已归档 · {len(archive)}</summary>'
+        f'<div class="archive-body">{archive_cards}</div></details>'
+    ) if has_archive else ""
+
+    board_cls = "board" + ("" if has_queue else " no-queue")
+    return f'''
+<div class="{board_cls}">
+  <section class="feed"><h2 class="section-title">
+    <span class="col-name">进展</span><span class="count">{len(feed)}</span>
+  </h2><div class="track-body">{feed_cards}</div></section>
+  {queue_html}
+</div>
+{archive_html}'''
 
 
 # ---------- stats ----------
@@ -246,15 +337,14 @@ CSS = r"""
 html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
   font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
   -webkit-font-smoothing:antialiased}
-a{color:var(--accent);text-decoration:none}
 button{font:inherit}
 
-/* top bar */
+/* topbar */
 .topbar{position:sticky;top:0;z-index:10;background:var(--panel);
   border-bottom:1px solid var(--line);padding:14px 22px;
   display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .topbar h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}
-.topbar .meta{color:var(--fg-2);font-size:11.5px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.topbar .meta{color:var(--fg-2);font-size:11.5px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:0;padding:0}
 .topbar .meta dt{display:inline;color:var(--fg-3);margin-right:4px}
 .topbar .meta dd{display:inline;margin:0}
 .topbar .meta code{background:var(--panel-2);padding:1px 6px;border-radius:4px;font-size:11px}
@@ -280,9 +370,9 @@ button{font:inherit}
 /* flow */
 .flow{padding:18px 22px;border-bottom:1px solid var(--line)}
 .section-title{margin:0 0 10px;font-size:11px;font-weight:600;color:var(--fg-3);
-  letter-spacing:.7px;text-transform:uppercase}
-.flow-wrap{overflow:auto;max-height:380px;
-  background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;
+  letter-spacing:.7px;text-transform:uppercase;display:flex;align-items:center;justify-content:space-between}
+.flow-wrap{overflow:auto;max-height:480px;
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 14px;
   display:flex;justify-content:center;align-items:flex-start}
 .flow-svg{display:block;max-width:100%;height:auto;flex:none}
 .svg-node{cursor:pointer}
@@ -294,24 +384,35 @@ button{font:inherit}
 .node-status{font:500 10px/1 -apple-system,system-ui,sans-serif}
 .node-title{font:500 12px/1 -apple-system,system-ui,sans-serif;fill:var(--fg)}
 .edge{fill:none;stroke:var(--line-2);stroke-width:1.2}
+.edge.bus{stroke-width:1.6;stroke-linecap:round}
 .arrow-head{fill:var(--line-2)}
 .svg-empty{padding:28px;text-align:center;color:var(--fg-3);font-size:12.5px}
 
-/* kanban */
+/* main board */
 main{padding:18px 22px 32px}
-.kanban{display:grid;grid-template-columns:repeat(auto-fit,minmax(248px,1fr));gap:12px}
-.col{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-  display:flex;flex-direction:column;max-height:72vh}
-.col > h2{margin:0;padding:11px 14px;font-size:11px;font-weight:600;letter-spacing:.6px;
-  text-transform:uppercase;color:var(--fg-2);border-bottom:1px solid var(--line);
-  display:flex;align-items:center;justify-content:space-between}
-.col-pending .col-name{color:#94a3b8}
-.col-in-progress .col-name{color:#3b82f6}
-.col-completed .col-name{color:#22c55e}
-.col-archived .col-name{color:#64748b}
-.count{background:var(--panel-2);padding:1px 8px;border-radius:10px;font-size:10.5px;color:var(--fg-2)}
-.col-body{padding:10px;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
+.board{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:14px;align-items:start}
+.board.no-queue{grid-template-columns:1fr}
+.feed,.queue{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  display:flex;flex-direction:column;max-height:none}
+.feed > .section-title,.queue > .section-title{margin:0;padding:11px 14px;
+  border-bottom:1px solid var(--line);color:var(--fg-2)}
+.col-name{color:var(--fg-2);font-weight:600;letter-spacing:.6px}
+.feed .col-name{color:#3b82f6}
+.queue .col-name{color:#94a3b8}
+.count{background:var(--panel-2);padding:1px 8px;border-radius:10px;font-size:10.5px;color:var(--fg-2);
+  text-transform:none;letter-spacing:0}
+.track-body{padding:10px;display:flex;flex-direction:column;gap:9px}
 .empty{color:var(--fg-3);font-size:11.5px;text-align:center;padding:22px 0}
+
+/* archive */
+.archive{margin-top:14px;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+.archive > summary{padding:11px 14px;cursor:pointer;font-size:11px;font-weight:600;
+  letter-spacing:.6px;text-transform:uppercase;color:var(--fg-3);list-style:none;
+  display:flex;align-items:center;gap:8px}
+.archive > summary::-webkit-details-marker{display:none}
+.archive > summary::before{content:"▸";color:var(--fg-3);transition:transform .15s}
+.archive[open] > summary::before{transform:rotate(90deg)}
+.archive-body{padding:10px 14px 14px;display:grid;grid-template-columns:repeat(auto-fill,minmax(248px,1fr));gap:10px}
 
 /* card */
 .card{background:var(--panel-2);border:1px solid var(--line);border-radius:7px;
@@ -345,10 +446,10 @@ main{padding:18px 22px 32px}
 footer{padding:16px 22px;text-align:center;color:var(--fg-3);font-size:10.5px;border-top:1px solid var(--line)}
 footer code{background:var(--panel-2);padding:1px 5px;border-radius:3px;font-size:10px}
 
-@media (max-width:640px){
+@media (max-width:780px){
+  .board{grid-template-columns:1fr}
+  .archive-body{grid-template-columns:1fr}
   .topbar,.progress,.flow,main,footer{padding-left:14px;padding-right:14px}
-  .topbar h1{font-size:14px}
-  .col{max-height:none}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{transition-duration:.01ms !important;animation-duration:.01ms !important}
@@ -357,7 +458,6 @@ footer code{background:var(--panel-2);padding:1px 5px;border-radius:3px;font-siz
   .pill{background:var(--panel);border-color:var(--line-2)}
 }
 """
-
 
 SUN_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3 3l1.1 1.1M11.9 11.9 13 13M3 13l1.1-1.1M11.9 4.1 13 3"/></svg>'
 MOON_SVG = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M6 1a7 7 0 1 0 9 9 5.6 5.6 0 0 1-9-9z"/></svg>'
@@ -375,7 +475,7 @@ def render_html(data):
     updated = escape(session.get("updated_at") or "")
 
     svg = build_svg(tasks)
-    kanban = render_kanban(tasks)
+    board = render_board(tasks)
 
     meta_items = []
     if project: meta_items.append(f'<dt>项目</dt><dd><code>{project}</code></dd>')
@@ -414,14 +514,11 @@ def render_html(data):
 </section>
 
 <section class="flow">
-  <h2 class="section-title">流程</h2>
+  <h2 class="section-title"><span>流程</span></h2>
   <div class="flow-wrap">{svg}</div>
 </section>
 
-<main>
-  <h2 class="section-title">看板</h2>
-  {kanban}
-</main>
+<main>{board}</main>
 
 <footer>
   由 <code>task-dashboard</code> 生成 · 数据 <code>.claude-tasks/dashboard.json</code> · 手动刷新页面查看最新状态
@@ -451,6 +548,8 @@ def render_html(data):
   function focusCard(id) {{
     const card = document.querySelector('.card[data-task-id="' + CSS.escape(id) + '"]');
     if (!card) return;
+    const a = card.closest('details');
+    if (a) a.open = true;
     card.scrollIntoView({{behavior:'smooth', block:'center'}});
     card.classList.add('flash');
     setTimeout(() => card.classList.remove('flash'), 1100);
@@ -463,10 +562,15 @@ def render_html(data):
 
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: render.py <input.json> <output.html>", file=sys.stderr)
+    argv = sys.argv[1:]
+    auto_open = False
+    if "--open" in argv:
+        auto_open = True
+        argv = [a for a in argv if a != "--open"]
+    if len(argv) < 2:
+        print("Usage: render.py <input.json> <output.html> [--open]", file=sys.stderr)
         sys.exit(2)
-    src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+    src, dst = Path(argv[0]), Path(argv[1])
     if not src.exists():
         print(f"Input not found: {src}", file=sys.stderr)
         sys.exit(2)
@@ -485,6 +589,12 @@ def main():
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(render_html(data), encoding="utf-8")
     print(f"Rendered → {dst}")
+    if auto_open:
+        try:
+            webbrowser.open(f"file://{dst.resolve()}")
+            print(f"Opened in browser")
+        except Exception as e:
+            print(f"(could not auto-open browser: {e})", file=sys.stderr)
 
 
 if __name__ == "__main__":

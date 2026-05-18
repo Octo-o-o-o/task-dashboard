@@ -1,8 +1,8 @@
 ---
 name: task-dashboard
-description: 维护一份项目本地的 HTML 任务看板（SVG 流程图 + Kanban + 任务详情），让用户用浏览器实时跟踪 Claude 的多步骤工作。当用户输入 `/task-dashboard`（可选附带任务描述）、说"打开/维护/补一个任务看板"、"task dashboard"、"可视化任务"，或当前项目已存在 `.claude-tasks/dashboard.json` 时启用。`/task-dashboard` 是单一入口，不论用户在会话什么阶段输入都按 SKILL.md 中的"启用决策"流程走：根据上下文自动判断是初始化新看板、还是从已发生的对话补建。已有看板的会话，后续每个有任务进展的轮次结束前自动同步并重渲染。
+description: 维护一份项目本地的 HTML 任务看板（SVG 流程图 + Feed 流 + 队列 + 归档），让用户用浏览器实时跟踪 Claude 的多步骤工作。当用户输入 `/task-dashboard`（可选附带任务描述）、说"打开/维护/补一个任务看板"、"task dashboard"、"可视化任务"，或当前项目已存在 `.claude-tasks/dashboard.json` 时启用。`/task-dashboard` 是单一入口，不论用户在会话什么阶段输入都按 SKILL.md 中的"启用决策"流程走：根据上下文自动判断是初始化新看板、还是从已发生的对话补建。首次创建后自动用默认浏览器打开 HTML。已有看板的会话，后续每个有任务进展的轮次结束前自动同步并重渲染。
 license: MIT
-allowed-tools: Bash(python3 *) Bash(mkdir *) Read Write Edit
+allowed-tools: Bash(python3 *) Bash(mkdir *) Bash(open *) Read Write Edit
 ---
 
 # Task Dashboard
@@ -40,11 +40,21 @@ allowed-tools: Bash(python3 *) Bash(mkdir *) Read Write Edit
 
 1. 准备目录：`mkdir -p .claude-tasks`
 2. 写入/更新 `.claude-tasks/dashboard.json`（schema 见下方速查或 [references/schema.md](references/schema.md)）
-3. 渲染：
+3. 渲染。**第一次创建**时加上 `--open`，让脚本顺便用默认浏览器打开 HTML：
+   ```bash
+   python3 "${CLAUDE_SKILL_DIR}/scripts/render.py" .claude-tasks/dashboard.json .claude-tasks/dashboard.html --open
+   ```
+   后续更新（看板已存在的轮次）省略 `--open`，避免每次都开新标签页：
    ```bash
    python3 "${CLAUDE_SKILL_DIR}/scripts/render.py" .claude-tasks/dashboard.json .claude-tasks/dashboard.html
    ```
-4. 首次创建时告诉用户：路径 `./.claude-tasks/dashboard.html`，在 Finder/资源管理器双击即可打开。后续更新不必每次汇报。
+4. 首次创建时把这段话告诉用户：
+
+   > 看板已生成并打开：`./.claude-tasks/dashboard.html`
+   >
+   > `.claude-tasks/` 是隐藏目录，在 Finder 默认看不到。如果浏览器关掉了想再打开，在终端执行 `open .claude-tasks/dashboard.html`（macOS）/`xdg-open ...`（Linux）/`start ...`（Windows）；或在 Finder 里按 `⌘⇧.` 切换显示隐藏文件。
+
+   后续更新不必再重复这段，沉默更新即可。
 
 ## 持续维护
 
